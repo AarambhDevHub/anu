@@ -30,3 +30,45 @@ imports, so it works when pasted into a blank notebook.
   only need bins? Upload it to the notebook and run with `--retrain 0`.
 - Dataset config mirrors `training/data/prepare_dataset.py`; keep both in
   sync if you change pack format or context length.
+
+---
+
+# Phase 3 on Kaggle (model training)
+
+**GPU accelerator required** (T4 or better). Self-contained script:
+`training/kaggle/phase3_train.py` — mirrors `training/train.py` + the model
+modules; keep in sync when changing either.
+
+## Setup
+
+1. Create a notebook with **GPU** accelerator.
+2. First cell: `!pip install -q tokenizers numpy tqdm` (torch is preinstalled).
+3. Add the Phase 1 outputs as an input dataset. Two options:
+   - Create a dataset version "anu-data" from the Phase 1 notebook's
+     downloaded outputs (`train.bin`, `valid.bin`, `meta.json`,
+     `tokenizer.json`) and Add input it to the notebook, or
+   - Drop the files into `/kaggle/input/anu-data/` via the notebook's
+     input section.
+4. Paste `training/kaggle/phase3_train.py` into a second cell and run.
+
+## Session budget
+
+- ~31M-param model, batch 16 x 512 tokens = 8,192 tokens/step.
+- `TOTAL_STEPS = 50_000` ≈ one epoch of the ~470M-token corpus; expect to
+  split this across several 12-hour sessions.
+
+## Resume across sessions (12h Kaggle cap)
+
+1. When a session ends (or you stop it), the latest checkpoint +
+   `metrics.jsonl` are in `/kaggle/working/checkpoints/` and auto-download.
+2. Upload those checkpoints back into the "anu-data" input dataset
+   (new version: keep `train.bin`/`valid.bin`/`meta.json`/`tokenizer.json`
+   plus the `checkpoints/` folder).
+3. Rerun the notebook: it auto-detects the latest `ckpt-*.pt` and continues
+   exactly where it left off (model + optimizer + LR schedule state).
+
+## Verifying progress
+
+- `metrics.jsonl` logs train loss, val loss, and sampled generations.
+- Val loss should trend down across checkpoints; samples should get
+  progressively more readable.

@@ -137,15 +137,3 @@ def test_overfit_single_batch(tiny_config):
     final = model.compute_loss(batch, targets).item()
     assert final < 0.05, f"overfit loss too high: {final}"
     assert final < initial / 10
-
-
-@pytest.fixture(scope="module")
-def tiny_config():
-    return ModelConfig(
-        vocab_size=300,
-        context_length=16,
-        n_layer=2,
-        n_embd=64,
-        n_head=4,
-        ffn_dim=256,
-    )
