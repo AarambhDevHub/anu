@@ -55,13 +55,17 @@ anu/
 
 ```bash
 cd training
-pip install -r requirements.txt
+uv sync          # or: uv sync --dev for tests/lint
 
-python data/train_tokenizer.py      # builds tokenizer.json
-python data/prepare_dataset.py      # downloads + tokenizes TinyStories
-python train.py                     # trains with checkpoint/resume
-python export.py                    # exports final weights to safetensors
+uv run python data/train_tokenizer.py      # builds tokenizer.json (full corpus)
+uv run python data/prepare_dataset.py      # downloads + tokenizes TinyStories
+uv run python train.py                     # trains with checkpoint/resume
+uv run python export.py                    # exports final weights to safetensors
 ```
+
+> Heavy runs (full-corpus tokenizer training, tokenization, model training)
+> execute on Kaggle — see [`training/kaggle/`](./training/kaggle/README.md)
+> for the ready-to-paste notebooks.
 
 ### Run the server (Rust)
 

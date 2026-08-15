@@ -23,14 +23,14 @@ Target: **10–12 days** (fits a 1–2 week window). Each phase lists duration, 
 ## Phase 1 — Tokenizer & Data Pipeline
 
 - **Duration:** 1 day
-- **Hardware:** Local CPU
+- **Hardware:** Local CPU (smoke tests) + Kaggle (full corpus — heavy BPE training and tokenization run there, not locally; see `training/kaggle/`)
 - **Tasks:**
   - Load `roneneldan/TinyStories` via the `datasets` library and pull `TinyStoriesV2-GPT4-train.txt` / `TinyStories-valid.txt`
-  - Train the BPE tokenizer with HF `tokenizers` (vocab_size = 12,000), save `tokenizer.json`
-  - Tokenize and chunk the dataset into fixed-length (512-token) packed sequences
-  - Build the PyTorch `Dataset`/`DataLoader`
+  - Train the BPE tokenizer with HF `tokenizers` (vocab_size = 12,000, byte-level, seeded with all 256 byte tokens so round-trip is lossless for any UTF-8), save `tokenizer.json`
+  - Tokenize and chunk the dataset into fixed-length (512-token) packed sequences (`train.bin` / `valid.bin`, uint16, `<|endoftext|>` separators)
+  - Build the PyTorch `Dataset`/`DataLoader` (random-offset windows over packed bins)
 - **Tests:**
-  - Tokenizer round-trip test (encode → decode → identical text)
+  - Tokenizer round-trip test (encode → decode → identical text, incl. unicode/emoji)
   - DataLoader batch shape/dtype test
 - **Milestone:** Tokenizer and data pipeline ready
 - **Git tag:** `v0.2.0-data`

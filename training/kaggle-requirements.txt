@@ -1,0 +1,6 @@
+# Kaggle-only requirements — torch is preinstalled on Kaggle.
+datasets>=3.0
+huggingface_hub>=0.27
+numpy>=2.0
+tokenizers>=0.20
+tqdm>=4.66
