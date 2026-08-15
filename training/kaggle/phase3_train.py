@@ -195,14 +195,15 @@ class TokenDataset(Dataset):
 # ---------------------------------------------------------------- training loop
 
 def find_data_dir() -> Path:
-    """Locate bins: prefer an 'anu-data' dataset in /kaggle/input, else /kaggle/working."""
-    for root in (Path("/kaggle/input"), Path("/kaggle/working")):
+    """Locate bins: prefer an 'anu-data' dataset in /kaggle/input, else
+    /kaggle/working (Kaggle) or the notebook's current directory (Colab)."""
+    for root in (Path("/kaggle/input"), Path("/kaggle/working"), Path(".")):
         if not root.exists():
             continue
         candidates = list(root.rglob("train.bin"))
         if candidates:
             return candidates[0].parent
-    raise FileNotFoundError("train.bin not found in /kaggle/input or /kaggle/working")
+    raise FileNotFoundError("train.bin not found in /kaggle/input, /kaggle/working or .")
 
 
 def find_latest_checkpoint(ckpt_dir: Path):
@@ -295,7 +296,12 @@ def evaluate(model, valid_data, num_batches, device):
 def main(data_dir: str | None = None, ckpt_dir: str | None = None):
     torch.manual_seed(SEED)
     data_dir = Path(data_dir) if data_dir else find_data_dir()
-    ckpt_dir = Path(ckpt_dir) if ckpt_dir else Path("/kaggle/working/checkpoints")
+    default_ckpt = (
+        Path("/kaggle/working/checkpoints")
+        if Path("/kaggle/working").exists()
+        else Path("checkpoints")
+    )
+    ckpt_dir = Path(ckpt_dir) if ckpt_dir else default_ckpt
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device={device} data_dir={data_dir}")
 

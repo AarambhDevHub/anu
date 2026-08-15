@@ -96,7 +96,8 @@ def main() -> None:
     parser.add_argument("--retrain", type=int, default=1,
                         help="0 = reuse an existing tokenizer.json instead of retraining")
     parser.add_argument("--splits", nargs="+", default=["train", "valid"])
-    args = parser.parse_args()
+    # parse_known_args: ignore Jupyter/Colab kernel args (e.g. `-f kernel.json`)
+    args, _ = parser.parse_known_args()
     out = out_dir()
 
     if args.retrain:
