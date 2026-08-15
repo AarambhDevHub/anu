@@ -1,0 +1,1 @@
+//! `GET /v1/models` — lists the served model (Phase 6).

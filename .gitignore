@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Rust
+server/target/
+
+# Data / weights (large or generated)
+training/data/raw/
+training/data/tokenized/
+*.pt
+*.bin
+weights/*.safetensors
+
+# Misc
+.DS_Store

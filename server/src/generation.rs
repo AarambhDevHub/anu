@@ -1,0 +1,1 @@
+//! KV-cache + sampling (temperature / top-k / top-p) — Phase 5-6.

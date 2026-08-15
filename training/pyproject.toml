@@ -1,0 +1,30 @@
+[project]
+name = "anu-training"
+version = "0.1.0"
+description = "Anu training half: a small decoder-only LLM trained from scratch in PyTorch"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "datasets>=3.0",
+    "numpy>=2.0",
+    "torch>=2.4",
+    "tokenizers>=0.20",
+    "tqdm>=4.66",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]

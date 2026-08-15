@@ -1,0 +1,1 @@
+//! `POST /v1/completions` — raw text completion with SSE streaming (Phase 6).
