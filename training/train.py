@@ -266,7 +266,10 @@ def run_training(cfg: TrainConfig, device: torch.device | None = None) -> list[d
         if use_cuda:
             torch.cuda.synchronize()
         t1 = time.perf_counter()
-        loss.backward()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
         if use_cuda:
             torch.cuda.synchronize()
         t2 = time.perf_counter()
