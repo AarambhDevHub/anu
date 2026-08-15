@@ -21,6 +21,7 @@ RESUME WORKFLOW (12h session cap):
 
 import json
 import math
+import time
 from pathlib import Path
 
 import numpy as np
@@ -30,8 +31,8 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 CONTEXT_LENGTH = 512
-TOTAL_STEPS = 50_000
-BATCH_SIZE = 16
+TOTAL_STEPS = 25_000
+BATCH_SIZE = 32
 LR = 3e-4
 MIN_LR = 1e-5
 WARMUP_STEPS = 500
@@ -91,10 +92,11 @@ class RotaryEmbedding(nn.Module):
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config, rope):
+    def __init__(self, config, rope, use_sdpa=False):
         super().__init__()
         self.n_embd, self.n_head, self.head_dim = config.n_embd, config.n_head, config.head_dim
         self.rope = rope
+        self.use_sdpa = use_sdpa
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=False)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
         causal = torch.tril(
@@ -109,10 +111,14 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         q, k = self.rope(q), self.rope(k)
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
-        att = att.masked_fill(~self.causal_mask[:T, :T], float("-inf"))
-        att = att.softmax(dim=-1)
-        y = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
+        if self.use_sdpa:
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+        else:
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
+            att = att.masked_fill(~self.causal_mask[:T, :T], float("-inf"))
+            att = att.softmax(dim=-1)
+            y = att @ v
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(y)
 
 
@@ -128,10 +134,10 @@ class MLP(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, config, rope):
+    def __init__(self, config, rope, use_sdpa=False):
         super().__init__()
         self.norm1 = RMSNorm(config.n_embd, config.rms_norm_eps)
-        self.attn = CausalSelfAttention(config, rope)
+        self.attn = CausalSelfAttention(config, rope, use_sdpa=use_sdpa)
         self.norm2 = RMSNorm(config.n_embd, config.rms_norm_eps)
         self.mlp = MLP(config)
 
@@ -142,13 +148,13 @@ class TransformerBlock(nn.Module):
 
 
 class AnuTransformer(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, use_sdpa=False):
         super().__init__()
         self.config = config
         self.token_embedding = nn.Embedding(config.vocab_size, config.n_embd)
         self.rope = RotaryEmbedding(config.head_dim, config.context_length)
         self.blocks = nn.ModuleList(
-            [TransformerBlock(config, self.rope) for _ in range(config.n_layer)]
+            [TransformerBlock(config, self.rope, use_sdpa) for _ in range(config.n_layer)]
         )
         self.final_rmsnorm = RMSNorm(config.n_embd, config.rms_norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -193,6 +199,18 @@ class TokenDataset(Dataset):
 
 
 # ---------------------------------------------------------------- training loop
+
+def fast_loss(model, input_ids, targets):
+    """CE in the autocast dtype (fp16/bf16): torch's cross_entropy upcasts
+    logits to fp32, which at vocab=12000 dominates wall time on a T4.
+    Max-subtraction keeps exp() in range, so this is numerically safe."""
+    logits = model(input_ids).view(-1, model.config.vocab_size)
+    targets = targets.view(-1)
+    max_logit = logits.max(dim=-1, keepdim=True).values
+    log_sum_exp = (logits - max_logit).exp().sum(dim=-1).log() + max_logit.squeeze(-1)
+    gathered = logits.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+    return (log_sum_exp - gathered).mean()
+
 
 def find_data_dir() -> Path:
     """Locate bins: prefer an 'anu-data' dataset in /kaggle/input, else
@@ -304,19 +322,27 @@ def main(data_dir: str | None = None, ckpt_dir: str | None = None):
     ckpt_dir = Path(ckpt_dir) if ckpt_dir else default_ckpt
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device={device} data_dir={data_dir}")
+    if device.type == "cuda":
+        name = torch.cuda.get_device_name(0)
+        capability = torch.cuda.get_device_capability(0)
+        print(f"GPU: {name} (cc {capability[0]}.{capability[1]})")
 
     meta = json.loads((data_dir / "meta.json").read_text())
     vocab_size = meta["vocab_size"]
     config = ModelConfig(vocab_size=vocab_size, context_length=CONTEXT_LENGTH)
-    model = AnuTransformer(config).to(device)
-
     use_cuda = device.type == "cuda"
+    model = AnuTransformer(config, use_sdpa=use_cuda).to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"model: {n_params / 1e6:.1f}M params (tied), "
+          f"tokens/step: {BATCH_SIZE * CONTEXT_LENGTH:,}")
+
     if use_cuda and torch.cuda.is_bf16_supported():
         dtype = torch.bfloat16
     elif use_cuda:
         dtype = torch.float16
     else:
         dtype = torch.float32
+    print(f"dtype={dtype}")
     scaler = torch.amp.GradScaler("cuda", enabled=(use_cuda and dtype == torch.float16))
     autocast = torch.autocast(device_type=device.type, dtype=dtype) if use_cuda else None
 
@@ -348,6 +374,7 @@ def main(data_dir: str | None = None, ckpt_dir: str | None = None):
 
     model.train()
     progress = tqdm(total=TOTAL_STEPS, initial=step, desc="training", unit="step")
+    t_fwd = t_bwd = t_opt = 0.0
     while step < TOTAL_STEPS:
         try:
             x, y = next(data_iter)
@@ -357,12 +384,15 @@ def main(data_dir: str | None = None, ckpt_dir: str | None = None):
         x, y = x.to(device), y.to(device)
 
         optimizer.zero_grad(set_to_none=True)
+        t0 = time.perf_counter()
         if autocast is None:
             loss = model.compute_loss(x, y)
         else:
             with autocast:
-                loss = model.compute_loss(x, y)
+                loss = fast_loss(model, x, y)
+        t1 = time.perf_counter()
         loss.backward()
+        t2 = time.perf_counter()
         if scaler is not None:
             scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
@@ -372,12 +402,27 @@ def main(data_dir: str | None = None, ckpt_dir: str | None = None):
         else:
             optimizer.step()
         lr_scheduler.step()
+        t3 = time.perf_counter()
+        t_fwd += (t1 - t0) * 1000
+        t_bwd += (t2 - t1) * 1000
+        t_opt += (t3 - t2) * 1000
         step += 1
         progress.update(1)
 
         if step % LOG_EVERY == 0:
-            metrics.append({"step": step, "train_loss": loss.item(),
-                            "lr": lr_at(min(step, TOTAL_STEPS - 1))})
+            metrics.append({
+                "step": step,
+                "train_loss": loss.item(),
+                "lr": lr_at(min(step, TOTAL_STEPS - 1)),
+                "fwd_ms": t_fwd / LOG_EVERY,
+                "bwd_ms": t_bwd / LOG_EVERY,
+                "opt_ms": t_opt / LOG_EVERY,
+            })
+            print(
+                f"step {step}: fwd+loss {t_fwd / LOG_EVERY:.0f}ms "
+                f"bwd {t_bwd / LOG_EVERY:.0f}ms opt {t_opt / LOG_EVERY:.0f}ms"
+            )
+            t_fwd = t_bwd = t_opt = 0.0
 
         if step % CHECKPOINT_INTERVAL == 0:
             save_checkpoint(ckpt_dir, step, model, optimizer, lr_scheduler, metrics)

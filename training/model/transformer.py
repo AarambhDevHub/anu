@@ -14,10 +14,12 @@ from .layers import MLP, CausalSelfAttention, RMSNorm, RotaryEmbedding
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, config: ModelConfig, rope: RotaryEmbedding):
+    def __init__(self, config: ModelConfig, rope: RotaryEmbedding, use_sdpa: bool = False):
         super().__init__()
         self.norm1 = RMSNorm(config.n_embd, config.rms_norm_eps)
-        self.attn = CausalSelfAttention(config.n_embd, config.n_head, config.context_length, rope)
+        self.attn = CausalSelfAttention(
+            config.n_embd, config.n_head, config.context_length, rope, use_sdpa=use_sdpa
+        )
         self.norm2 = RMSNorm(config.n_embd, config.rms_norm_eps)
         self.mlp = MLP(config.n_embd, config.ffn_dim)
 
@@ -30,13 +32,14 @@ class TransformerBlock(nn.Module):
 class AnuTransformer(nn.Module):
     """Decoder-only transformer with tied input embedding / output head."""
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, use_sdpa: bool = False):
         super().__init__()
         self.config = config
+        self.use_sdpa = use_sdpa
         self.token_embedding = nn.Embedding(config.vocab_size, config.n_embd)
         self.rope = RotaryEmbedding(config.head_dim, config.context_length)
         self.blocks = nn.ModuleList(
-            [TransformerBlock(config, self.rope) for _ in range(config.n_layer)]
+            [TransformerBlock(config, self.rope, use_sdpa) for _ in range(config.n_layer)]
         )
         self.final_rmsnorm = RMSNorm(config.n_embd, config.rms_norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)

@@ -10,6 +10,7 @@ import math
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 class RMSNorm(nn.Module):
@@ -53,14 +54,21 @@ class RotaryEmbedding(nn.Module):
 
 
 class CausalSelfAttention(nn.Module):
-    """Scaled dot-product attention with a causal mask, applied to every position."""
+    """Scaled dot-product attention with a causal mask.
 
-    def __init__(self, n_embd: int, n_head: int, context_length: int, rope: RotaryEmbedding):
+    use_sdpa=True uses torch's fused attention (training-time optimization —
+    memory-bandwidth cheaper than the explicit (B,H,T,T) matrix). The manual
+    path stays the parity source of truth for the Candle port.
+    """
+
+    def __init__(self, n_embd: int, n_head: int, context_length: int, rope: RotaryEmbedding,
+                 use_sdpa: bool = False):
         super().__init__()
         self.n_embd = n_embd
         self.n_head = n_head
         self.head_dim = n_embd // n_head
         self.rope = rope
+        self.use_sdpa = use_sdpa
         self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=False)
         self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
         causal = torch.tril(torch.ones(context_length, context_length, dtype=torch.bool))
@@ -76,10 +84,13 @@ class CausalSelfAttention(nn.Module):
         q = self.rope(q)
         k = self.rope(k)
 
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
-        att = att.masked_fill(~self.causal_mask[:T, :T], float("-inf"))
-        att = att.softmax(dim=-1)
-        y = att @ v  # (B, H, T, D)
+        if self.use_sdpa:
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        else:
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
+            att = att.masked_fill(~self.causal_mask[:T, :T], float("-inf"))
+            att = att.softmax(dim=-1)
+            y = att @ v  # (B, H, T, D)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(y)
 

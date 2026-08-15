@@ -59,6 +59,7 @@ Target: **10–12 days** (fits a 1–2 week window). Each phase lists duration, 
   - Port the training script into a Kaggle notebook (`training/kaggle/phase3_train.py`, self-contained; mirrors `training/train.py` — keep in sync)
   - Implement checkpoint/resume: save every N steps to `/kaggle/working` (auto-downloaded as notebook output); on session restart, upload the latest checkpoint into the input dataset and rerun — the script auto-resumes model + optimizer + LR schedule state
   - Run the training loop with cosine LR schedule + warmup, mixed precision (bf16 on T4-class, fp16 + GradScaler fallback)
+  - Speed knobs: fused SDPA attention and a low-precision cross-entropy (avoids the fp32 logits upcast that dominates a T4 step at vocab=12000); batch 32 x 512 tokens, `TOTAL_STEPS=25_000` ≈ one epoch in ~4-6h
   - Monitor validation loss and periodically sample generations to track qualitative progress (logged to `checkpoints/metrics.jsonl`)
   - Respect the 12-hour session cap and ~30 GPU-hour/week budget — plan sessions accordingly
 - **Tests:**

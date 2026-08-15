@@ -6,12 +6,39 @@ from model import AnuTransformer, ModelConfig
 from train import (
     build_lr_schedule,
     build_optimizer,
+    compute_fast_loss,
     find_latest_checkpoint,
     generate,
     load_checkpoint,
     run_training,
     save_checkpoint,
 )
+
+
+def test_fast_loss_matches_standard_ce(tiny_config):
+    torch.manual_seed(0)
+    model = AnuTransformer(tiny_config)
+    model.eval()
+    x = torch.randint(0, tiny_config.vocab_size, (4, 16))
+    y = torch.roll(x, -1, dims=1)
+    standard = model.compute_loss(x, y)
+    fast = compute_fast_loss(model, x, y)
+    assert torch.allclose(fast, standard, atol=1e-2)
+    assert fast.requires_grad  # must stay differentiable
+
+
+def test_sdpa_matches_manual_attention(tiny_config):
+    torch.manual_seed(0)
+    manual = AnuTransformer(tiny_config)
+    sdpa = AnuTransformer(tiny_config, use_sdpa=True)
+    sdpa.load_state_dict(manual.state_dict())
+    manual.eval()
+    sdpa.eval()
+    x = torch.randint(0, tiny_config.vocab_size, (2, 16))
+    with torch.no_grad():
+        a = manual(x)
+        b = sdpa(x)
+    assert torch.allclose(a, b, atol=1e-3)
 
 
 def test_lr_schedule_warmup_and_decay():

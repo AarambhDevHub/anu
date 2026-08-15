@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -25,7 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from data.dataset import TokenDataset, load_meta  # noqa: E402
-from model import AnuTransformer, ModelConfig  # noqa: E402
+from model import AnuTransformer, ModelConfig, num_parameters  # noqa: E402
 
 DEFAULT_SAMPLE_PROMPTS = [
     "Once upon a time",
@@ -40,8 +41,8 @@ class TrainConfig:
     data_dir: Path = PROJECT_ROOT / "data" / "tokenized"
     ckpt_dir: Path = PROJECT_ROOT / "data" / "checkpoints"
     tokenizer_path: Path = PROJECT_ROOT / ".." / "weights" / "tokenizer.json"
-    total_steps: int = 50_000
-    batch_size: int = 16
+    total_steps: int = 25_000
+    batch_size: int = 32
     lr: float = 3e-4
     min_lr: float = 1e-5
     warmup_steps: int = 500
@@ -174,17 +175,36 @@ def evaluate(
     return total / count
 
 
+def compute_fast_loss(
+    model: torch.nn.Module, input_ids: torch.Tensor, targets: torch.Tensor
+) -> torch.Tensor:
+    """Cross-entropy computed in the autocast dtype (fp16/bf16).
+
+    torch's cross_entropy upcasts logits to fp32 internally, which at
+    vocab_size=12000 dominates wall time on a T4 (the whole (B*T, 12000)
+    logits tensor materialized in fp32). Max-subtraction keeps exp() in
+    range, so this is numerically safe. Training-only — sample.py uses the
+    exact fp32 CE for parity.
+    """
+    logits = model(input_ids).view(-1, model.config.vocab_size)
+    targets = targets.view(-1)
+    max_logit = logits.max(dim=-1, keepdim=True).values
+    log_sum_exp = (logits - max_logit).exp().sum(dim=-1).log() + max_logit.squeeze(-1)
+    gathered = logits.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+    return (log_sum_exp - gathered).mean()
+
+
 def run_training(cfg: TrainConfig, device: torch.device | None = None) -> list[dict]:
     torch.manual_seed(cfg.seed)
     meta = load_meta(cfg.data_dir / "meta.json")
     context_length = meta["context_length"]
     config = ModelConfig(vocab_size=meta["vocab_size"], context_length=context_length)
-    model = AnuTransformer(config)
 
     device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+    use_cuda = device.type == "cuda"
+    model = AnuTransformer(config, use_sdpa=use_cuda)
     model.to(device)
 
-    use_cuda = device.type == "cuda"
     if use_cuda and torch.cuda.is_bf16_supported():
         dtype = torch.bfloat16
     elif use_cuda:
@@ -193,6 +213,15 @@ def run_training(cfg: TrainConfig, device: torch.device | None = None) -> list[d
         dtype = torch.float32
     scaler = torch.amp.GradScaler("cuda", enabled=(use_cuda and dtype == torch.float16))
     autocast = torch.autocast(device_type=device.type, dtype=dtype) if use_cuda else None
+
+    if use_cuda:
+        name = torch.cuda.get_device_name(0)
+        capability = torch.cuda.get_device_capability(0)
+        print(f"GPU: {name} (cc {capability[0]}.{capability[1]}) dtype={dtype}")
+    print(
+        f"model: {num_parameters(model) / 1e6:.1f}M params (tied), "
+        f"tokens/step: {cfg.batch_size * context_length:,}"
+    )
 
     optimizer = build_optimizer(model, cfg.lr, cfg.weight_decay)
     lr_at = build_lr_schedule(cfg.total_steps, cfg.warmup_steps, cfg.lr, cfg.min_lr)
@@ -218,6 +247,7 @@ def run_training(cfg: TrainConfig, device: torch.device | None = None) -> list[d
 
     model.train()
     progress = tqdm(total=cfg.total_steps, initial=step, desc="training", unit="step")
+    t_fwd = t_bwd = t_opt = 0.0
     while step < cfg.total_steps:
         try:
             x, y = next(data_iter)
@@ -227,12 +257,15 @@ def run_training(cfg: TrainConfig, device: torch.device | None = None) -> list[d
         x, y = x.to(device), y.to(device)
 
         optimizer.zero_grad(set_to_none=True)
+        t0 = time.perf_counter()
         if autocast is None:
             loss = model.compute_loss(x, y)
         else:
             with autocast:
-                loss = model.compute_loss(x, y)
+                loss = compute_fast_loss(model, x, y)
+        t1 = time.perf_counter()
         loss.backward()
+        t2 = time.perf_counter()
         if scaler is not None:
             scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -242,6 +275,10 @@ def run_training(cfg: TrainConfig, device: torch.device | None = None) -> list[d
         else:
             optimizer.step()
         lr_scheduler.step()
+        t3 = time.perf_counter()
+        t_fwd += (t1 - t0) * 1000
+        t_bwd += (t2 - t1) * 1000
+        t_opt += (t3 - t2) * 1000
         step += 1
         progress.update(1)
 
@@ -251,8 +288,16 @@ def run_training(cfg: TrainConfig, device: torch.device | None = None) -> list[d
                     "step": step,
                     "train_loss": loss.item(),
                     "lr": lr_at(min(step, cfg.total_steps - 1)),
+                    "fwd_ms": t_fwd / cfg.log_every,
+                    "bwd_ms": t_bwd / cfg.log_every,
+                    "opt_ms": t_opt / cfg.log_every,
                 }
             )
+            print(
+                f"step {step}: fwd+loss {t_fwd / cfg.log_every:.0f}ms "
+                f"bwd {t_bwd / cfg.log_every:.0f}ms opt {t_opt / cfg.log_every:.0f}ms"
+            )
+            t_fwd = t_bwd = t_opt = 0.0
 
         if step % cfg.checkpoint_interval == 0:
             save_checkpoint(cfg.ckpt_dir, step, model, optimizer, lr_scheduler, metrics)

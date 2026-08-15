@@ -53,9 +53,13 @@ modules; keep in sync when changing either.
 
 ## Session budget
 
-- ~31M-param model, batch 16 x 512 tokens = 8,192 tokens/step.
-- `TOTAL_STEPS = 50_000` ≈ one epoch of the ~470M-token corpus; expect to
-  split this across several 12-hour sessions.
+- ~31M-param model, batch 32 x 512 tokens = 16,384 tokens/step.
+- `TOTAL_STEPS = 25_000` ≈ one epoch of the ~470M-token corpus; on a T4
+  expect ~4-6h total, typically split across 2 sessions.
+- Speedup knobs: training uses the fused attention (`use_sdpa`) and a
+  low-precision cross-entropy (no fp32 logits upcast); the log prints a
+  per-phase breakdown (`fwd+loss / bwd / opt` ms) every 25 steps so you can
+  see where time goes.
 
 ## Resume across sessions (12h Kaggle cap)
 
