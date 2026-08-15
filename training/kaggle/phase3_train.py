@@ -183,7 +183,7 @@ class AnuTransformer(nn.Module):
 
 class TokenDataset(Dataset):
     def __init__(self, bin_path, context_length, seed=0):
-        self.data = np.memmap(bin_path, dtype=np.uint16, mode="r")
+        self.data = np.fromfile(bin_path, dtype=np.uint16)
         self.context_length = context_length
         self.rng = np.random.default_rng(seed)
         self.max_offset = max(0, len(self.data) - context_length - 1)
@@ -336,13 +336,13 @@ def main(data_dir: str | None = None, ckpt_dir: str | None = None):
     print(f"model: {n_params / 1e6:.1f}M params (tied), "
           f"tokens/step: {BATCH_SIZE * CONTEXT_LENGTH:,}")
 
-    if use_cuda and torch.cuda.is_bf16_supported():
+    if use_cuda and torch.cuda.is_bf16_supported() and torch.cuda.get_device_capability(0)[0] >= 8:
         dtype = torch.bfloat16
     elif use_cuda:
         dtype = torch.float16
     else:
         dtype = torch.float32
-    print(f"dtype={dtype}")
+    print(f"dtype={dtype} (bf16 needs cc>=8; T4/P100 use fp16 tensor cores)")
     scaler = torch.amp.GradScaler("cuda", enabled=(use_cuda and dtype == torch.float16))
     autocast = torch.autocast(device_type=device.type, dtype=dtype) if use_cuda else None
 
@@ -390,8 +390,12 @@ def main(data_dir: str | None = None, ckpt_dir: str | None = None):
         else:
             with autocast:
                 loss = fast_loss(model, x, y)
+        if use_cuda:
+            torch.cuda.synchronize()
         t1 = time.perf_counter()
         loss.backward()
+        if use_cuda:
+            torch.cuda.synchronize()
         t2 = time.perf_counter()
         if scaler is not None:
             scaler.unscale_(optimizer)

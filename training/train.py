@@ -205,7 +205,7 @@ def run_training(cfg: TrainConfig, device: torch.device | None = None) -> list[d
     model = AnuTransformer(config, use_sdpa=use_cuda)
     model.to(device)
 
-    if use_cuda and torch.cuda.is_bf16_supported():
+    if use_cuda and torch.cuda.is_bf16_supported() and torch.cuda.get_device_capability(0)[0] >= 8:
         dtype = torch.bfloat16
     elif use_cuda:
         dtype = torch.float16
@@ -263,8 +263,12 @@ def run_training(cfg: TrainConfig, device: torch.device | None = None) -> list[d
         else:
             with autocast:
                 loss = compute_fast_loss(model, x, y)
+        if use_cuda:
+            torch.cuda.synchronize()
         t1 = time.perf_counter()
         loss.backward()
+        if use_cuda:
+            torch.cuda.synchronize()
         t2 = time.perf_counter()
         if scaler is not None:
             scaler.unscale_(optimizer)

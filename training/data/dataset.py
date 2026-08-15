@@ -16,8 +16,17 @@ from torch.utils.data import Dataset
 
 
 class TokenDataset(Dataset):
+    """Random-offset windows over a packed uint16 bin.
+
+    The bin is loaded fully into RAM on init (np.fromfile), NOT kept as a
+    memmap: with num_workers=0 the memmap's page-faulting on every random
+    slice serializes the main thread and leaves the GPU idle most of each
+    step (random access into /kaggle/input is especially slow). A 2GB bin
+    loads in seconds and fits comfortably in Kaggle's ~13GB of RAM.
+    """
+
     def __init__(self, bin_path: str | Path, context_length: int, seed: int | None = None):
-        self.data = np.memmap(bin_path, dtype=np.uint16, mode="r")
+        self.data = np.fromfile(bin_path, dtype=np.uint16)
         self.context_length = context_length
         self.rng = np.random.default_rng(seed)
         self.max_offset = max(0, len(self.data) - context_length - 1)
